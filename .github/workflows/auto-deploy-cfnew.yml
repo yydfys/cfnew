@@ -32,9 +32,17 @@ jobs:
         id: check
         run: |
           set -euo pipefail
-          JSON=$(curl -sf -H "Authorization: token $GH_TOKEN" -H "User-Agent: cfnew-auto-deploy" "$GH_API/repos/$TARGET_REPO/compare/main...$UPSTREAM_REPO:main")
-          AHEAD=$(printf '%s' "$JSON" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("ahead_by",0))')
-          MSG=$(curl -sf -H "Authorization: token $GH_TOKEN" -H "User-Agent: cfnew-auto-deploy" "$GH_API/repos/$UPSTREAM_REPO/commits/main" | python3 -c 'import sys,json;print(json.load(sys.stdin)["commit"]["message"].splitlines()[0])')
+          CMP_URL="$GH_API/repos/$TARGET_REPO/compare/main...$UPSTREAM_REPO:main"
+          echo "GET $CMP_URL"
+          CODE=$(curl -sS -o /tmp/cmp.json -w '%{http_code}' \
+            -H "Authorization: token $GH_TOKEN" -H "User-Agent: cfnew-auto-deploy" "$CMP_URL")
+          echo "HTTP $CODE"
+          head -c 300 /tmp/cmp.json; echo ""
+          if [ "$CODE" != "200" ]; then echo "::error::compare 接口返回 $CODE"; exit 1; fi
+          AHEAD=$(python3 -c 'import json;print(json.load(open("/tmp/cmp.json")).get("ahead_by",0))')
+          MSG=$(curl -sf -H "Authorization: token $GH_TOKEN" -H "User-Agent: cfnew-auto-deploy" \
+            "$GH_API/repos/$UPSTREAM_REPO/commits/main" \
+            | python3 -c 'import sys,json;print(json.load(sys.stdin)["commit"]["message"].splitlines()[0])')
           echo "ahead=$AHEAD" >> "$GITHUB_OUTPUT"
           echo "latest=$MSG" >> "$GITHUB_OUTPUT"
           echo "上游领先提交数: $AHEAD | 最新提交: $MSG"
