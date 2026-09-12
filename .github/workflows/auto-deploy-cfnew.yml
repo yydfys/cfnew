@@ -54,16 +54,18 @@ jobs:
 
       - name: 同步 fork 到上游
         if: steps.check.outputs.ahead != '0'
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           set -euo pipefail
-          echo "→ 调用 merge-upstream 同步 fork"
-          curl -sS -X POST \
-            -H "Authorization: token $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            "$GH_API/repos/$TARGET_REPO/merge-upstream" \
-            -d '{"branch":"main"}'
-          echo ""
-          sleep 5
+          git config user.name "cfnew-auto-deploy"
+          git config user.email "cfnew-auto-deploy@users.noreply.github.com"
+          echo "→ 合并上游提交并推送回 fork"
+          git merge --no-edit upstream/main
+          git remote set-url origin "https://x-access-token:${GH_PAT}@github.com/${TARGET_REPO}.git"
+          git push origin HEAD:main
+          git remote set-url origin "https://github.com/${TARGET_REPO}.git"
+          sleep 3
           git fetch --no-tags origin main
           if ! git merge-base --is-ancestor upstream/main origin/main; then
             echo "::error::同步失败：上游提交未进入 fork"
