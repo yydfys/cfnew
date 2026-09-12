@@ -32,9 +32,9 @@ jobs:
         id: check
         run: |
           set -euo pipefail
-          JSON=$(curl -sf "$GH_API/repos/$TARGET_REPO/compare/main...$UPSTREAM_REPO:main")
+          JSON=$(curl -sf -H "Authorization: token $GH_TOKEN" -H "User-Agent: cfnew-auto-deploy" "$GH_API/repos/$TARGET_REPO/compare/main...$UPSTREAM_REPO:main")
           AHEAD=$(printf '%s' "$JSON" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("ahead_by",0))')
-          MSG=$(curl -sf "$GH_API/repos/$UPSTREAM_REPO/commits/main" | python3 -c 'import sys,json;print(json.load(sys.stdin)["commit"]["message"].splitlines()[0])')
+          MSG=$(curl -sf -H "Authorization: token $GH_TOKEN" -H "User-Agent: cfnew-auto-deploy" "$GH_API/repos/$UPSTREAM_REPO/commits/main" | python3 -c 'import sys,json;print(json.load(sys.stdin)["commit"]["message"].splitlines()[0])')
           echo "ahead=$AHEAD" >> "$GITHUB_OUTPUT"
           echo "latest=$MSG" >> "$GITHUB_OUTPUT"
           echo "上游领先提交数: $AHEAD | 最新提交: $MSG"
@@ -51,6 +51,14 @@ jobs:
             -d '{"branch":"main"}'
           echo ""
           sleep 5
+          LEFT=$(curl -sf -H "Authorization: token $GH_TOKEN" -H "User-Agent: cfnew-auto-deploy" \
+            "$GH_API/repos/$TARGET_REPO/compare/main...$UPSTREAM_REPO:main" \
+            | python3 -c 'import sys,json;print(json.load(sys.stdin).get("ahead_by",-1))')
+          if [ "$LEFT" != "0" ]; then
+            echo "::error::同步后仍落后 $LEFT 个提交，中止部署"
+            exit 1
+          fi
+          echo "同步完成：落后提交数已归零"
 
       - name: 从 fork 拉取源码并生成 _worker.js
         if: steps.check.outputs.ahead != '0'
