@@ -1,0 +1,146 @@
+name: cfnew auto deploy
+
+# 用途：上游 byJoey/cfnew 有新提交时，自动同步 fork（yydfys/cfnew）并部署到 Cloudflare Pages 项目 cfnew
+# 触发：每 6 小时定时检查 + 手动/API 触发
+# 无更新时直接空转结束（不部署、不通知）
+
+on:
+  schedule:
+    # UTC 时间，每 6 小时一次（对应北京时间 02:23 / 08:23 / 14:23 / 20:23）
+    - cron: '23 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cfnew-auto-deploy
+  cancel-in-progress: false
+
+jobs:
+  auto-deploy:
+    runs-on: ubuntu-latest
+    env:
+      GH_API: https://api.github.com
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TARGET_REPO: yydfys/cfnew
+      UPSTREAM_REPO: byJoey/cfnew
+      SOURCE_FILE: 明文源吗
+      SITE_DOMAIN: cfnew.yyff.de5.net
+    steps:
+      - name: 检查上游是否有新提交
+        id: check
+        run: |
+          set -euo pipefail
+          JSON=$(curl -sf "$GH_API/repos/$TARGET_REPO/compare/main...$UPSTREAM_REPO:main")
+          AHEAD=$(printf '%s' "$JSON" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("ahead_by",0))')
+          MSG=$(curl -sf "$GH_API/repos/$UPSTREAM_REPO/commits/main" | python3 -c 'import sys,json;print(json.load(sys.stdin)["commit"]["message"].splitlines()[0])')
+          echo "ahead=$AHEAD" >> "$GITHUB_OUTPUT"
+          echo "latest=$MSG" >> "$GITHUB_OUTPUT"
+          echo "上游领先提交数: $AHEAD | 最新提交: $MSG"
+
+      - name: 同步 fork 到上游
+        if: steps.check.outputs.ahead != '0'
+        run: |
+          set -euo pipefail
+          echo "→ 调用 merge-upstream 同步 fork"
+          curl -sS -X POST \
+            -H "Authorization: token $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "$GH_API/repos/$TARGET_REPO/merge-upstream" \
+            -d '{"branch":"main"}'
+          echo ""
+          sleep 5
+
+      - name: 从 fork 拉取源码并生成 _worker.js
+        if: steps.check.outputs.ahead != '0'
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          ENC=$(python3 -c 'import urllib.parse,os;print(urllib.parse.quote(os.environ["SOURCE_FILE"]))')
+          curl -sfL -H "Authorization: token $GH_TOKEN" -H "Accept: application/vnd.github.raw" \
+            "$GH_API/repos/$TARGET_REPO/contents/$ENC?ref=main" -o build/_worker.js
+          ls -l build/_worker.js
+          head -c 80 build/_worker.js; echo ""
+
+      - name: 部署到 Cloudflare Pages
+        id: deploy
+        if: steps.check.outputs.ahead != '0'
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CF_API_TOKEN }}
+          accountId: ${{ secrets.CF_ACCOUNT_ID }}
+          command: pages deploy build --project-name=cfnew --branch=main --commit-dirty=true
+
+      - name: 部署成功通知（QQ）
+        if: success() && steps.check.outputs.ahead != '0'
+        env:
+          QQ_APP_ID: ${{ secrets.QQ_BOT_APP_ID }}
+          QQ_SECRET: ${{ secrets.QQ_BOT_CLIENT_SECRET }}
+          QQ_OPENID: ${{ secrets.QQ_BOT_OPENID }}
+          AHEAD: ${{ steps.check.outputs.ahead }}
+          LATEST: ${{ steps.check.outputs.latest }}
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.request
+
+          app_id = os.environ["QQ_APP_ID"]
+          secret = os.environ["QQ_SECRET"]
+          openid = os.environ["QQ_OPENID"]
+          content = (
+              "🚀 cfnew 已自动升级\n"
+              "━━━━━━━━━━━━━━━\n"
+              f"上游新增提交：{os.environ['AHEAD']} 个\n"
+              f"最新提交：{os.environ['LATEST']}\n"
+              f"已上线：{os.environ.get('SITE_DOMAIN','cfnew.yyff.de5.net')}\n"
+              "KV / 优选IP / 域名均未改动"
+          )
+          req = urllib.request.Request(
+              "https://bots.qq.com/app/getAppAccessToken",
+              data=json.dumps({"appId": app_id, "clientSecret": secret}).encode(),
+              headers={"Content-Type": "application/json"},
+          )
+          token = json.loads(urllib.request.urlopen(req, timeout=20).read())["access_token"]
+          req2 = urllib.request.Request(
+              f"https://api.sgroup.qq.com/v2/users/{openid}/messages",
+              data=json.dumps({"content": content, "msg_type": 0, "msg_seq": 101}).encode(),
+              headers={"Authorization": f"QQBot {token}", "Content-Type": "application/json"},
+          )
+          print("QQ 通知返回:", urllib.request.urlopen(req2, timeout=20).status)
+          PY
+
+      - name: 部署失败通知（QQ）
+        if: failure() && steps.deploy.outcome == 'failure'
+        env:
+          QQ_APP_ID: ${{ secrets.QQ_BOT_APP_ID }}
+          QQ_SECRET: ${{ secrets.QQ_BOT_CLIENT_SECRET }}
+          QQ_OPENID: ${{ secrets.QQ_BOT_OPENID }}
+          AHEAD: ${{ steps.check.outputs.ahead }}
+          LATEST: ${{ steps.check.outputs.latest }}
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.request
+
+          app_id = os.environ["QQ_APP_ID"]
+          secret = os.environ["QQ_SECRET"]
+          openid = os.environ["QQ_OPENID"]
+          content = (
+              "❌ cfnew 自动升级失败\n"
+              "━━━━━━━━━━━━━━━\n"
+              f"上游新增提交：{os.environ['AHEAD']} 个\n"
+              f"最新提交：{os.environ['LATEST']}\n"
+              "线上仍是旧版本，需人工介入"
+          )
+          req = urllib.request.Request(
+              "https://bots.qq.com/app/getAppAccessToken",
+              data=json.dumps({"appId": app_id, "clientSecret": secret}).encode(),
+              headers={"Content-Type": "application/json"},
+          )
+          token = json.loads(urllib.request.urlopen(req, timeout=20).read())["access_token"]
+          req2 = urllib.request.Request(
+              f"https://api.sgroup.qq.com/v2/users/{openid}/messages",
+              data=json.dumps({"content": content, "msg_type": 0, "msg_seq": 102}).encode(),
+              headers={"Authorization": f"QQBot {token}", "Content-Type": "application/json"},
+          )
+          print("QQ 通知返回:", urllib.request.urlopen(req2, timeout=20).status)
+          PY
